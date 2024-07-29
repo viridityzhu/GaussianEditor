@@ -18,7 +18,7 @@ class GaussianEditor_Edit(GaussianEditor):
 
         seg_prompt: str = ""
 
-        second_guidance_type: str = "dds"
+        second_guidance_type: str = "sdse"
         second_guidance: dict = field(default_factory=dict)
         dds_target_prompt_processor: dict = field(default_factory=dict)
         dds_source_prompt_processor: dict = field(default_factory=dict)
@@ -60,7 +60,12 @@ class GaussianEditor_Edit(GaussianEditor):
             self.second_guidance = threestudio.find(self.cfg.second_guidance_type)(
                 self.cfg.second_guidance
             )
+        if self.cfg.loss.lambda_sdse > 0:
+            self.second_guidance = threestudio.find(self.cfg.second_guidance_type)(
+                self.cfg.second_guidance
+            )
 
+ 
     def training_step(self, batch, batch_idx):
         self.gaussian.update_learning_rate(self.true_global_step)
 
@@ -122,6 +127,24 @@ class GaussianEditor_Edit(GaussianEditor):
                 ),
                 dds_target_prompt_utils,
                 dds_source_prompt_utils,
+            )
+            for name, value in second_guidance_out.items():
+                self.log(f"train/{name}", value)
+                if name.startswith("loss_"):
+                    loss += value * self.C(
+                        self.cfg.loss[name.replace("loss_", "lambda_")]
+                    )
+
+        # sdse loss
+        if self.cfg.loss.lambda_sdse > 0:
+            prompt_utils = self.prompt_processor()
+
+            second_guidance_out = self.second_guidance(
+                out["comp_rgb"],
+                torch.concatenate(
+                    [self.origin_frames[idx] for idx in batch_index], dim=0
+                ),
+                prompt_utils,
             )
             for name, value in second_guidance_out.items():
                 self.log(f"train/{name}", value)

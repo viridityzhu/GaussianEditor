@@ -43,6 +43,11 @@ class InstructPix2PixGuidance(BaseObject):
 
         use_sds: bool = False
 
+        max_steps:int = 20000
+        use_sdse: bool = False
+        use_non_incr_timesteps: bool = True
+        mode_change_step: int = 800
+
     cfg: Config
 
     def configure(self) -> None:
@@ -110,7 +115,60 @@ class InstructPix2PixGuidance(BaseObject):
 
         self.grad_clip_val: Optional[float] = None
 
+        self.dynamic_t: bool = False
+        self.global_step: int = 0
+        if self.cfg.use_non_incr_timesteps:
+            self.dynamic_t_sampling_init(self.cfg.max_steps, self.cfg.min_step_percent, self.cfg.max_step_percent)
+            threestudio.info("Using non-increasing timesteps.")
+
         threestudio.info(f"Loaded InstructPix2Pix!")
+
+    def dynamic_t_sampling_init(self, total_it, min_step_r=0.02, max_step_r=0.80):
+        # --------- non-increasing t sampling ---------
+        self.dynamic_t = True
+        self.min_step = int(min_step_r * self.num_train_timesteps)
+        self.max_step = int(max_step_r * self.num_train_timesteps)
+        self.time_prior = [800, 500, 300, 100]
+        r1, r2, s1, s2 = self.time_prior # r1, r2 for range, s1 s2 for exponents
+        weights = torch.cat(
+            (
+                torch.exp( # 800-900
+                    -(torch.arange(self.max_step, r1, -1) - r1)
+                        / (2 * s1)
+                    ),
+                torch.ones(r1 - r2 + 1), # 500-800
+                torch.exp( # 20-500
+                        -(torch.arange(r2 - 1, self.min_step, -1) - r2) / (2 * s2)
+                    ),
+            )
+        )
+        weights = weights / torch.sum(weights)
+        self.cumulative_density = torch.cumsum(weights, dim=0)
+        self.iters = total_it
+        self.t_choice = self.t_choice_nonlinear(self.iters)
+
+
+    def t_choice_nonlinear(self, max_it: int):
+        total_num_steps = self.max_step - self.min_step
+        t_choice = []
+        for i in range(0, max_it + 1):
+            current_it_ratio = i / (max_it + 1)
+            time_index = torch.where(
+                        (self.cumulative_density - current_it_ratio) > 0
+                    )[0][0]
+            if time_index == 0 or torch.abs(
+                self.cumulative_density[time_index] - current_it_ratio
+            ) < torch.abs(
+                self.cumulative_density[time_index - 1] - current_it_ratio
+            ):
+                t = total_num_steps - time_index
+            else:
+                t = total_num_steps - time_index + 1
+            t = torch.clip(t, self.min_step, self.max_step + 1)
+            t = torch.full((1,), t, dtype=torch.long, device=self.device)
+            t_choice.append(t)
+        return t_choice
+
 
     @torch.cuda.amp.autocast(enabled=False)
     def set_min_max_steps(self, min_step_percent=0.02, max_step_percent=0.98):
@@ -238,6 +296,49 @@ class InstructPix2PixGuidance(BaseObject):
         grad = w * (noise_pred - noise)
         return grad
 
+    def compute_grad_sdse(
+        self,
+        text_embeddings: Float[Tensor, "BB 77 768"],
+        latents: Float[Tensor, "B 4 DH DW"],
+        image_cond_latents: Float[Tensor, "B 4 DH DW"],
+        t: Int[Tensor, "B"],
+    ):
+        with torch.no_grad():
+            # add noise
+            noise = torch.randn_like(latents)  # TODO: use torch generator
+            latents_noisy = self.scheduler.add_noise(latents, noise, t)
+            # pred noise
+            latent_model_input = torch.cat([latents_noisy] * 3)
+            latent_model_input = torch.cat(
+                [latent_model_input, image_cond_latents], dim=1
+            )
+
+            noise_pred = self.forward_unet(
+                latent_model_input, t, encoder_hidden_states=text_embeddings
+            )
+
+        noise_pred_text, noise_pred_image, noise_pred_uncond = noise_pred.chunk(3)
+        mode_disengaging = (self.cfg.condition_scale - 1) * (noise_pred_image - noise_pred_uncond)
+        mode_seeking = self.cfg.guidance_scale * (noise_pred_text - noise_pred_image) + noise_pred_image
+        noise_pred = mode_disengaging + mode_seeking
+        # noise_pred = (
+        #     noise_pred_uncond
+        #     + self.cfg.guidance_scale * (noise_pred_text - noise_pred_image)
+        #     + self.cfg.condition_scale * (noise_pred_image - noise_pred_uncond)
+        # )
+
+        if t > self.cfg.mode_change_step: # 800-900
+            # disengaging
+            curr_term = mode_disengaging
+        else: # 20-800
+            # seeking
+            curr_term = mode_seeking - noise
+
+        w = (1 - self.alphas[t]).view(-1, 1, 1, 1)
+        # grad = w * (noise_pred - noise)
+        grad = w * curr_term
+        return grad
+
     def __call__(
         self,
         rgb: Float[Tensor, "B H W C"],
@@ -273,14 +374,17 @@ class InstructPix2PixGuidance(BaseObject):
             [text_embeddings, text_embeddings[-1:]], dim=0
         )  # [positive, negative, negative]
 
-        # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
-        t = torch.randint(
-            self.min_step,
-            self.max_step + 1,
-            [batch_size],
-            dtype=torch.long,
-            device=self.device,
-        )
+        if self.dynamic_t:
+            t = self.t_choice[self.global_step]
+        else:
+            # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
+            t = torch.randint(
+                self.min_step,
+                self.max_step + 1,
+                [batch_size],
+                dtype=torch.long,
+                device=self.device,
+            )
 
         if self.cfg.use_sds:
             grad = self.compute_grad_sds(text_embeddings, latents, cond_latents, t)
@@ -291,6 +395,19 @@ class InstructPix2PixGuidance(BaseObject):
             loss_sds = 0.5 * F.mse_loss(latents, target, reduction="sum") / batch_size
             return {
                 "loss_sds": loss_sds,
+                "grad_norm": grad.norm(),
+                "min_step": self.min_step,
+                "max_step": self.max_step,
+            }
+        elif self.cfg.use_sdse:
+            grad = self.compute_grad_sdse(text_embeddings, latents, cond_latents, t)
+            grad = torch.nan_to_num(grad)
+            if self.grad_clip_val is not None:
+                grad = grad.clamp(-self.grad_clip_val, self.grad_clip_val)
+            target = (latents - grad).detach()
+            loss_sds = 0.5 * F.mse_loss(latents, target, reduction="sum") / batch_size
+            return {
+                "loss_sdse": loss_sds,
                 "grad_norm": grad.norm(),
                 "min_step": self.min_step,
                 "max_step": self.max_step,
@@ -306,6 +423,8 @@ class InstructPix2PixGuidance(BaseObject):
         # clip grad for stable training as demonstrated in
         # Debiasing Scores and Prompts of 2D Diffusion for Robust Text-to-3D Generation
         # http://arxiv.org/abs/2303.15413
+        self.global_step = global_step
+
         if self.cfg.grad_clip is not None:
             self.grad_clip_val = C(self.cfg.grad_clip, epoch, global_step)
 

@@ -1,4 +1,4 @@
-name: "edit-n2n"
+name: "edit-sdse"
 tag: "${rmspace:${system.prompt_processor.prompt},_}"
 exp_root_dir: "outputs"
 seed: 0
@@ -39,6 +39,17 @@ system:
     guidance_scale: 7.5
     condition_scale: 1.5
 
+  second_guidance_type: "stable-diffusion-instructpix2pix-guidance"
+  second_guidance:
+    max_steps: ${trainer.max_steps}
+    min_step_percent: 0.02
+    max_step_percent: 0.80
+    guidance_scale: 7.5
+    condition_scale: 1.5
+    use_sdse: true
+    use_non_incr_timesteps: true
+    mode_change_step: 800
+
 
   loggers:
     wandb:
@@ -48,11 +59,11 @@ system:
 
   loss:
 #    lambda_opaque: 0.0
-    lambda_sdse: 0
+    lambda_sdse: 0.0000001
     lambda_sparsity: 0.0
     lambda_opaque: 0.0
-    lambda_l1: 10.
-    lambda_p: 10.
+    lambda_l1: 0.
+    lambda_p: 0.
     lambda_dds: 0.
     lambda_anchor_color: 5
     lambda_anchor_geo: 50

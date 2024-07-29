@@ -5,6 +5,8 @@ import os
 import sys
 import wandb
 
+wandb.require("core")
+
 
 class ColoredFilter(logging.Filter):
     """
