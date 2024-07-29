@@ -1,3 +1,19 @@
+Add SDS-E, a specially tailored SDS for Editing, that selectively incorporates subterms of SDS across diffusion timesteps.
+
+For more information, see [InstructHumans](https://jyzhu.top/instruct-humans/)
+
+If you use this work or find it helpful, please consider citing:
+
+```bib
+@article{zhu2024InstructHumans,
+         author={Zhu, Jiayin and Yang, Linlin and Yao, Angela},
+         title={InstructHumans: Editing Animated 3D Human Textures with Instructions},
+         journal={arXiv preprint arXiv:2404.04037},
+         year={2024}
+}
+```
+
+---
 
 <p align="center">
   <img src="docs/figs/logo.png" align="center" width="50%">
