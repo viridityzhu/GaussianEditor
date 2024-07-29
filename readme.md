@@ -2,6 +2,9 @@ Add SDS-E, a specially tailored SDS for Editing, that selectively incorporates s
 
 For more information, see [InstructHumans](https://jyzhu.top/instruct-humans/)
 
+![comparison-gseditor-sdse](https://github.com/user-attachments/assets/4f68626e-2c6f-4ed7-893c-72b52b6af0ed)
+
+
 If you use this work or find it helpful, please consider citing:
 
 ```bib
